@@ -1,5 +1,6 @@
 import os
 import io
+import gc
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -10,7 +11,7 @@ from PIL import Image
 app = Flask(__name__)
 CORS(app)
 
-# ── Model Architecture (matches training exactly) ──────────────────────────
+# ── Model Architecture ─────────────────────────────────────────────────────
 class DeeperCNN(nn.Module):
     def __init__(self):
         super(DeeperCNN, self).__init__()
@@ -42,16 +43,23 @@ class DeeperCNN(nn.Module):
         x = self.fc_layer(x)
         return x
 
-# ── Load model ─────────────────────────────────────────────────────────────
-device = torch.device("cpu")
+# ── Load model — memory efficient ─────────────────────────────────────────
+torch.set_num_threads(1)  # limit CPU threads to reduce memory overhead
+
 model = DeeperCNN()
 model_path = os.path.join(os.path.dirname(__file__), "Main_Model.pth")
-model.load_state_dict(torch.load(model_path, map_location=device))
+
+# Load weights directly to CPU with mmap to avoid double-loading in RAM
+state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+model.load_state_dict(state_dict)
 model.eval()
+
+# Free the state dict immediately after loading
+del state_dict
+gc.collect()
 
 CLASS_NAMES = ["Angry", "Engaged", "Happy", "Neutral"]
 
-# Inference transform — no augmentation, just resize + normalize
 transform = transforms.Compose([
     transforms.Resize((48, 48)),
     transforms.ToTensor(),
@@ -75,11 +83,15 @@ def predict():
 
     try:
         image = Image.open(io.BytesIO(file.read())).convert("L")
-        tensor = transform(image).unsqueeze(0).to(device)
+        tensor = transform(image).unsqueeze(0)
 
         with torch.no_grad():
             output = model(tensor)
             probs = torch.softmax(output, dim=1)[0].tolist()
+
+        # Free tensor memory immediately
+        del tensor, output
+        gc.collect()
 
         prediction_idx = probs.index(max(probs))
 
